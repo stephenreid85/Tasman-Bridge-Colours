@@ -37,10 +37,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         events = coordinator.data or []
         
         active_hex = DEFAULT_COLOR_HEX
+        accent_hex = DEFAULT_COLOR_HEX
         for event in events:
             # Check if current time falls within the 12:00 PM to 12:00 PM window
             if event["active_start"] <= current_time < event["active_end"]:
-                active_hex = event["color_hex"]
+                hexes = event["color_hexes"]
+                active_hex = hexes[0]
+                # On multi-colour nights (e.g. "Pink/white/blue") the second
+                # colour becomes the accent, so the theme shows both
+                accent_hex = hexes[1] if len(hexes) > 1 else hexes[0]
                 break
         
         # Inject custom dark theme into Home Assistant
@@ -48,7 +53,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.data[DATA_THEMES]["Tasman Bridge"] = {
                 # Brand Colors
                 "primary-color": active_hex,
-                "accent-color": active_hex,
+                "accent-color": accent_hex,
                 
                 # Backgrounds
                 "primary-background-color": "#111111",

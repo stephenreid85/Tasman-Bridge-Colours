@@ -2,6 +2,8 @@
 import re
 import logging
 from datetime import date, datetime, time, timedelta
+
+import aiohttp
 from bs4 import BeautifulSoup
 
 from homeassistant.core import HomeAssistant
@@ -9,7 +11,15 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, SCRAPE_URL, UPDATE_INTERVAL, COLOR_MAP, DEFAULT_COLOR
+from .const import (
+    DOMAIN,
+    SCRAPE_URL,
+    UPDATE_INTERVAL,
+    COLOR_MAP,
+    DEFAULT_COLOR,
+    REQUEST_HEADERS,
+    COLOR_SEPARATOR_PATTERN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,7 +45,11 @@ class TasmanBridgeCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self):
         """Fetch data from website."""
         try:
-            async with self.session.get(SCRAPE_URL) as response:
+            async with self.session.get(
+                SCRAPE_URL,
+                headers=REQUEST_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
                 response.raise_for_status()
                 html = await response.text()
                 
@@ -61,13 +75,9 @@ class TasmanBridgeCoordinator(DataUpdateCoordinator):
             if len(cols) >= 3:
                 date_str = cols[0].get_text(strip=True)
                 purpose = cols[1].get_text(strip=True)
-                color_raw = cols[2].get_text(strip=True).lower()
-                
-                # Check for "Pending" or missing colors
-                if not color_raw or "pending" in color_raw:
-                    color_raw = DEFAULT_COLOR
+                color_raw = cols[2].get_text(strip=True)
 
-                color_hex = COLOR_MAP.get(color_raw, COLOR_MAP[DEFAULT_COLOR])
+                color_names, color_hexes = self._parse_colors(color_raw)
                 start_date, end_date = self._parse_date_string(date_str, current_year)
 
                 if start_date and end_date:
@@ -78,8 +88,10 @@ class TasmanBridgeCoordinator(DataUpdateCoordinator):
                     events.append({
                         "date_str": date_str,
                         "purpose": purpose,
-                        "color_name": color_raw.title(),
-                        "color_hex": color_hex,
+                        "color_name": "/".join(n.title() for n in color_names),
+                        "color_names": [n.title() for n in color_names],
+                        "color_hex": color_hexes[0],
+                        "color_hexes": color_hexes,
                         "active_start": active_start,
                         "active_end": active_end
                     })
@@ -87,6 +99,42 @@ class TasmanBridgeCoordinator(DataUpdateCoordinator):
         # Ensure sorted chronologically
         events.sort(key=lambda x: x["active_start"])
         return events
+
+    def _parse_colors(self, color_raw):
+        """Split a Colour cell into parallel lists of names and hex values.
+
+        The cell is free text and may name several colours, e.g.
+        "Pink/white/blue". Unrecognised words are logged and skipped, so a new
+        colour appearing on the website degrades to the ones we do know rather
+        than silently reporting the default.
+        """
+        color_raw = color_raw.replace("\xa0", " ").strip().lower()
+
+        # "Application pending" rows have no colour allocated yet
+        if not color_raw or "pending" in color_raw:
+            return [DEFAULT_COLOR], [COLOR_MAP[DEFAULT_COLOR]]
+
+        names = []
+        hexes = []
+        for token in re.split(COLOR_SEPARATOR_PATTERN, color_raw):
+            token = token.strip()
+            if not token:
+                continue
+            if token in COLOR_MAP:
+                names.append(token)
+                hexes.append(COLOR_MAP[token])
+            else:
+                _LOGGER.warning(
+                    "Unrecognised Tasman Bridge colour %r (in cell %r); "
+                    "add it to COLOR_MAP in const.py",
+                    token,
+                    color_raw,
+                )
+
+        if not hexes:
+            return [DEFAULT_COLOR], [COLOR_MAP[DEFAULT_COLOR]]
+
+        return names, hexes
 
     def _parse_date_string(self, date_str, current_year):
         """Convert '15 - 17 March 2026' into start and end date objects."""

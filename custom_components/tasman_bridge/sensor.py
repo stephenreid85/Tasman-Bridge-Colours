@@ -78,9 +78,19 @@ class TasmanBridgeSensor(CoordinatorEntity, SensorEntity):
     @property
     def extra_state_attributes(self):
         """Return extra attributes."""
-        if self._field == "colour":
-            current_time = dt_util.now()
-            upcoming_events = [e for e in self.coordinator.data if e["active_end"] > current_time]
-            if self._index < len(upcoming_events):
-                return {"hex_value": upcoming_events[self._index]["color_hex"]}
-        return {}
+        if self._field != "colour" or not self.coordinator.data:
+            return {}
+
+        current_time = dt_util.now()
+        upcoming_events = [e for e in self.coordinator.data if e["active_end"] > current_time]
+        if self._index >= len(upcoming_events):
+            return {}
+
+        event = upcoming_events[self._index]
+        return {
+            # hex_value stays the primary colour so existing cards keep working
+            "hex_value": event["color_hex"],
+            "hex_values": event["color_hexes"],
+            "colour_names": event["color_names"],
+            "is_multi_colour": len(event["color_hexes"]) > 1,
+        }
