@@ -1,4 +1,5 @@
 """DataUpdateCoordinator for Tasman Bridge."""
+import asyncio
 import re
 import logging
 from datetime import date, datetime, time, timedelta
@@ -22,6 +23,8 @@ from .const import (
     COLOR_SEPARATOR_PATTERN,
     STORAGE_VERSION,
     STORAGE_KEY,
+    FETCH_ATTEMPTS,
+    FETCH_BACKOFF,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -49,13 +52,7 @@ class TasmanBridgeCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self):
         """Fetch data from website, falling back to the last good schedule."""
         try:
-            async with self.session.get(
-                SCRAPE_URL,
-                headers=REQUEST_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                response.raise_for_status()
-                html = await response.text()
+            html = await self._async_fetch_html()
 
             current_year = dt_util.now().year
             events = await self.hass.async_add_executor_job(self._parse_html, html, current_year)
@@ -79,6 +76,32 @@ class TasmanBridgeCoordinator(DataUpdateCoordinator):
             await self._async_save_cache(events)
 
         return events
+
+    async def _async_fetch_html(self):
+        """Fetch the page, retrying through Cloudflare's intermittent challenge."""
+        last_err = None
+
+        for attempt in range(1, FETCH_ATTEMPTS + 1):
+            try:
+                async with self.session.get(
+                    SCRAPE_URL,
+                    headers=REQUEST_HEADERS,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    response.raise_for_status()
+                    return await response.text()
+            except Exception as err:
+                last_err = err
+                if attempt < FETCH_ATTEMPTS:
+                    _LOGGER.debug(
+                        "Tasman Bridge fetch attempt %d/%d failed (%s); retrying",
+                        attempt,
+                        FETCH_ATTEMPTS,
+                        err,
+                    )
+                    await asyncio.sleep(FETCH_BACKOFF * attempt)
+
+        raise last_err
 
     async def _async_load_cache(self):
         """Return the persisted schedule, or None if there isn't a usable one."""
