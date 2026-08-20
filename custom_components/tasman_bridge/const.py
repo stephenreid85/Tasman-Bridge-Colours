@@ -41,6 +41,12 @@ COLOR_MAP = {
 # on plain spaces, so multi-word names like "warm white" survive intact.
 COLOR_SEPARATOR_PATTERN = r"\s*(?:[/|,+&]|\band\b)\s*"
 
+# Persisted copy of the last successful scrape. The published schedule changes
+# rarely, so cached events stay correct for days and let the integration ride
+# out a failed fetch instead of dropping every entity to unavailable.
+STORAGE_VERSION = 1
+STORAGE_KEY = "tasman_bridge_schedule"
+
 DEFAULT_COLOR = "warm white"
 DEFAULT_COLOR_HEX = COLOR_MAP[DEFAULT_COLOR]
 

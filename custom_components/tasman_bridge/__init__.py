@@ -1,6 +1,6 @@
 """The Tasman Bridge integration."""
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.components.frontend import DATA_THEMES
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.util import dt as dt_util
@@ -31,7 +31,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    async def update_theme_and_state(*args):
+    @callback
+    def update_theme_and_state(*args):
         """Calculate the active color and update the HA Theme."""
         current_time = dt_util.now()
         events = coordinator.data or []
@@ -96,17 +97,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.bus.async_fire("themes_updated")
 
     # Update theme immediately on boot and every time coordinator fetches
-    coordinator.async_add_listener(update_theme_and_state)
-    await update_theme_and_state()
+    entry.async_on_unload(coordinator.async_add_listener(update_theme_and_state))
+    update_theme_and_state()
 
     # Schedule targeted refresh times
     # 11:30 AM: Scrape latest data from government website
     async def fetch_latest(*args):
         await coordinator.async_request_refresh()
-    async_track_time_change(hass, fetch_latest, hour=11, minute=30, second=0)
+    # Tracked via async_on_unload so reloads replace these timers rather than
+    # stacking a fresh pair on top of the old ones.
+    entry.async_on_unload(
+        async_track_time_change(hass, fetch_latest, hour=11, minute=30, second=0)
+    )
 
     # 12:00 PM: Force refresh to trigger the midday state & theme rollover
-    async_track_time_change(hass, fetch_latest, hour=12, minute=0, second=1)
+    entry.async_on_unload(
+        async_track_time_change(hass, fetch_latest, hour=12, minute=0, second=1)
+    )
 
     return True
 

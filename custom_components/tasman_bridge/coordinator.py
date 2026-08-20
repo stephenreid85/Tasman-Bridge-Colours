@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -19,6 +20,8 @@ from .const import (
     DEFAULT_COLOR,
     REQUEST_HEADERS,
     COLOR_SEPARATOR_PATTERN,
+    STORAGE_VERSION,
+    STORAGE_KEY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -41,9 +44,10 @@ class TasmanBridgeCoordinator(DataUpdateCoordinator):
             update_interval=UPDATE_INTERVAL,
         )
         self.session = async_get_clientsession(hass)
+        self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
 
     async def _async_update_data(self):
-        """Fetch data from website."""
+        """Fetch data from website, falling back to the last good schedule."""
         try:
             async with self.session.get(
                 SCRAPE_URL,
@@ -52,12 +56,58 @@ class TasmanBridgeCoordinator(DataUpdateCoordinator):
             ) as response:
                 response.raise_for_status()
                 html = await response.text()
-                
+
             current_year = dt_util.now().year
             events = await self.hass.async_add_executor_job(self._parse_html, html, current_year)
-            return events
         except Exception as err:
+            # A transient failure (the site WAF returning 403, a timeout) should
+            # not blank out every entity. Reuse what we already have, or what we
+            # persisted on a previous run if this is a restart.
+            cached = self.data or await self._async_load_cache()
+            if cached:
+                _LOGGER.warning(
+                    "Tasman Bridge fetch failed (%s); serving %d cached events",
+                    err,
+                    len(cached),
+                )
+                return cached
             raise UpdateFailed(f"Error communicating with API: {err}")
+
+        # Only persist a real schedule; an empty parse means the page changed
+        # shape and should not wipe a good cache.
+        if events:
+            await self._async_save_cache(events)
+
+        return events
+
+    async def _async_load_cache(self):
+        """Return the persisted schedule, or None if there isn't a usable one."""
+        stored = await self._store.async_load()
+        if not stored:
+            return None
+
+        events = []
+        for raw in stored.get("events", []):
+            event = dict(raw)
+            event["active_start"] = dt_util.parse_datetime(raw.get("active_start", ""))
+            event["active_end"] = dt_util.parse_datetime(raw.get("active_end", ""))
+            if event["active_start"] and event["active_end"]:
+                events.append(event)
+
+        return events or None
+
+    async def _async_save_cache(self, events):
+        """Persist the schedule, with datetimes flattened to ISO strings."""
+        await self._store.async_save({
+            "events": [
+                {
+                    **event,
+                    "active_start": event["active_start"].isoformat(),
+                    "active_end": event["active_end"].isoformat(),
+                }
+                for event in events
+            ]
+        })
 
     def _parse_html(self, html, current_year):
         """Parse the HTML table synchronously using BeautifulSoup."""
@@ -66,6 +116,10 @@ class TasmanBridgeCoordinator(DataUpdateCoordinator):
         
         events = []
         if not table:
+            _LOGGER.warning(
+                "No schedule table found at %s - the page layout may have changed",
+                SCRAPE_URL,
+            )
             return events
 
         tz = dt_util.DEFAULT_TIME_ZONE
